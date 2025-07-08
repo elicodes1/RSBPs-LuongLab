@@ -1,6 +1,6 @@
 # Raspberry Pi Pico Multi-Channel Temperature Logger
 
-A low-power, multi-channel temperature data logger built on MicroPython. This project reads up to five NTC thermistors (via an HW-178 multiplexer), monitors battery voltage, and writes time-tagged (or elapsed-time) readings to a microSD card. It uses a DS3231 RTC for accurate timing, a push-button to start logging, and an LED for status indicators. Deep-sleep between cycles maximizes battery life, with an automatic shutdown at a configurable low-SOC threshold.
+A low-power, multi-channel temperature data logger built on MicroPython. This project reads a desired number of NTC thermistors (via an HW-178 multiplexer), monitors battery voltage, and writes elapsed-time taggs, readings to a microSD card. It uses a DS3231 RTC for accurate timing, a push-button to start logging, and an LED for status indicators. Deep-sleep between cycles maximizes battery life, with an automatic shutdown at a configurable low-SOC threshold.
 
 ## Features
 - **5-channel thermistor measurements** with per-sensor calibration offsets  
@@ -29,4 +29,4 @@ A low-power, multi-channel temperature data logger built on MicroPython. This pr
 
 ---
 
-Feel free to tweak any constants in the “USER CONFIG” section at the top of `main.py`. Enjoy precise, off-grid temperature monitoring!  
+Enjoy precise, off-grid temperature monitoring!  
