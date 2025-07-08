@@ -1,0 +1,171 @@
+# main_calibration.py
+# MicroPython script for RP2040 Pico to read:
+#   1) Atlas EZO-RTD reference temperature over UART
+#   2) Six NTC thermistors via a 74HC4051 MUX into ADC0 (GP26)
+#
+# It then prints each thermistor’s calculated temperature alongside the
+# EZO reference so you can determine per-channel offsets.
+
+import machine
+import time
+import math
+import ure  # built-in MicroPython regex module
+
+# ——— CONFIGURATION ———
+
+# UART (EZO-RTD) settings
+UART_ID              = 0       # Use UART(0): TX=GP0, RX=GP1
+EZO_BAUDRATE         = 9600    # Atlas default is 9600
+EZO_CONVERSION_DELAY = 900     # ms to wait after sending "R\r"
+EZO_READ_LEN         = 32      # read up to 32 bytes (enough for full response)
+
+# MUX control pins (EN is hardwired to GND on the HW-178 board)
+S0_PIN = 2       # MUX select bit 0 → Pico GP2
+S1_PIN = 3       # MUX select bit 1 → Pico GP3
+S2_PIN = 4       # MUX select bit 2 → Pico GP4
+
+# ADC pin for thermistors (MUX COM) → GP26 (ADC0)
+ADC_IN = machine.ADC(0)
+
+# Number of thermistor channels on MUX (C0…C5)
+NUM_THERM  = 6
+REF_CHANNEL = 6  # Channel 6 is reserved if you ever log system voltage
+
+# Thermistor setup
+PULLUP_RES   = 10_000   # 10 kΩ pull-up resistor on each channel
+VPULL        = 3.27     # measured Pico 3.3 V rail (adjust if your Pico reads ~3.30 V)
+
+# Steinhart–Hart coefficients for a “standard” 10 kΩ NTC (B ≈ 3950).
+Acoef = 1.009249522e-3
+Bcoef = 2.378405444e-4
+Ccoef = 2.019202697e-7
+
+# OFFSETS: per-channel adjustment (°C). Start at zero; you will compute actual offsets.
+OFFSETS = {0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0}
+
+# ——— SET UP PINS ———
+
+# MUX select pins
+S0 = machine.Pin(S0_PIN, machine.Pin.OUT)
+S1 = machine.Pin(S1_PIN, machine.Pin.OUT)
+S2 = machine.Pin(S2_PIN, machine.Pin.OUT)
+
+# ——— SET UP UART FOR EZO-RTD ———
+
+# Construct UART with exactly two positional args (id, baudrate)
+uart = machine.UART(UART_ID, EZO_BAUDRATE)
+# On UART(0): TX=GP0, RX=GP1
+
+# Flush any pending data
+while uart.any():
+    uart.read()
+
+# Pre-compile a regex to capture the first ASCII float (e.g. "21.923")
+float_rx = ure.compile(br"-?\d+\.\d+")
+
+# ——— HELPER FUNCTIONS ———
+
+def select_mux(ch):
+    """
+    Drive S0..S2 to select MUX input channel (0..7).
+    EN is tied low on the HW-178 so that COM is always active.
+    """
+    S0.value(ch & 1)
+    S1.value((ch >> 1) & 1)
+    S2.value((ch >> 2) & 1)
+
+def read_therm_two_step(ch):
+    """
+    Two-step ADC read for thermistor on MUX channel ch (0..5):
+      1) select MUX channel, wait for the node to settle (and any small bypass cap to charge)
+      2) do a dummy ADC read to charge the ADC’s internal sample cap
+      3) wait a few ms for any tiny self-heating to dissipate
+      4) do the true ADC read, compute v_adc, R_th, and then Steinhart–Hart → temp_raw
+      5) apply OFFSETS[ch] → temp_cal
+    Returns:
+      (temp_cal, raw_adc, v_adc, R_th) or (None, raw_adc, v_adc, None) on error
+    """
+    select_mux(ch)
+    time.sleep_ms(40)  # allow MUX output (and optional 0.01µF cap) to settle
+
+    _ = ADC_IN.read_u16()  # dummy read to charge ADC cap
+    time.sleep_ms(5)       # wait for any minimal self-heating of the NTC
+
+    raw = ADC_IN.read_u16()
+    v_adc = raw * (VPULL / 65535.0)
+
+    try:
+        # R_th formula for pull-up→NTC→GND configuration
+        R_th = (v_adc / (VPULL - v_adc)) * PULLUP_RES
+
+        lnR = math.log(R_th)
+        Tk  = 1.0 / (Acoef + Bcoef * lnR + Ccoef * lnR**3)
+        temp_raw = Tk - 273.15
+        temp_cal = temp_raw + OFFSETS[ch]
+    except Exception:
+        R_th = None
+        temp_cal = None
+
+    return temp_cal, raw, v_adc, R_th
+
+def read_ezo_rtd_parsed():
+    """
+    Send "R\r" to the Atlas EZO-RTD, wait for conversion, read up to EZO_READ_LEN bytes,
+    extract the first ASCII float, convert to Python float (°C), and return it.
+    Returns None on error or no valid float found.
+    """
+    try:
+        # 1) Send ASCII command "R\r"
+        uart.write(b"R\r")
+
+        # 2) Wait for the board to convert (~900 ms typical)
+        time.sleep_ms(EZO_CONVERSION_DELAY)
+
+        # 3) Read whatever bytes have arrived (up to EZO_READ_LEN)
+        raw = uart.read(EZO_READ_LEN)
+        if not raw:
+            return None
+
+        # 4) Find the first matching float substring
+        m = float_rx.search(raw)
+        if not m:
+            return None
+
+        # 5) Convert matched bytes (e.g. b"21.923") → "21.923" → 21.923
+        temp_str = m.group(0).decode("utf-8")
+        return float(temp_str)
+    except Exception:
+        return None
+
+# ——— MAIN SCRIPT ———
+
+print("Starting calibration loop. Press CTRL-C to stop.\n")
+
+while True:
+    # 1) Read EZO-RTD reference temperature
+    T_ezo = read_ezo_rtd_parsed()
+    if T_ezo is None:
+        print("[ERROR] Failed to read EZO-RTD reference.\n")
+        time.sleep(5)
+        continue
+
+    # 2) Print EZO reference
+    print(f"[REFERENCE] EZO-RTD → {T_ezo:.3f} °C")
+
+    # 3) Read each of the six thermistor channels
+    for ch in range(NUM_THERM):
+        Tt, raw_t, v_t, R_t = read_therm_two_step(ch)
+        if Tt is None:
+            print(f"[TH{ch}] Error reading channel")
+            continue
+
+        # Compute offset = (EZO reference - thermistor reading)
+        offset = T_ezo - Tt
+        print(
+            f"[TH{ch}] raw={raw_t:5d}  v_adc={v_t:1.3f} V  R={R_t:7.1f} Ω  "
+            f"Tt={Tt:5.3f} °C  Offset=(EZO−Tt)={offset:+.3f}"
+        )
+
+    print("")  # blank line
+    # 4) Pause before the next cycle
+    time.sleep(5)
