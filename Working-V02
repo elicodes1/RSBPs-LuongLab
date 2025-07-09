@@ -1,7 +1,6 @@
 from machine   import Pin, SoftI2C, SoftSPI, ADC, deepsleep, reset_cause, PWRON_RESET
 import sdcard, os, utime, math
 
-# — USER CONFIG ————————————————————————————————————— #
 LOG_INTERVAL   = 1200        # seconds between log cycles
 LOW_SOC_LIMIT  = 5           # %SOC below which we abort
 NUM_THERM      = 5           # channels on your HW-178
@@ -10,20 +9,16 @@ BTN_PIN        = 16          # start button (to 3V3)
 LED_PIN        = 20          # external LED via 330 Ω to GND
 BAT_ADC_CH     = 1           # GP27 / A1
 
-# Thermistor constants
 OFFSETS = {0:-7.412,1:-7.603,2:-7.521,3:-7.782,4:-7.700}
 a_A, b_B, c_C = 1.009249522e-3, 2.378405444e-4, 2.019202697e-7
 PULLUP_RES     = 10_000
 VPULL          = 3.30        # pull-up voltage for thermistor divider
 
-# Battery divider: two 10 kΩ → V_div = ½·V_bat
 BAT_R1, BAT_R2 = 10_000, 10_000
 
-# RTC DS3231 on GP14/15
 RTC_SCL, RTC_SDA = 14, 15
 DS3231_ADDR     = 0x68
 
-# — SETUP PINS ————————————————————————————————————— #
 btn   = Pin(BTN_PIN, Pin.IN,  Pin.PULL_DOWN)
 led   = Pin(LED_PIN, Pin.OUT, value=0)
 
@@ -32,7 +27,6 @@ adc0  = ADC(0)
 adc_b = ADC(BAT_ADC_CH)
 S0,S1,S2 = [Pin(p,Pin.OUT) for p in (2,3,4)]
 
-# — HELPERS ————————————————————————————————————————— #
 def bcd2dec(b): return (b>>4)*10 + (b&0x0F)
 
 def select_mux(ch):
@@ -60,7 +54,6 @@ def read_battery():
     print(f"  [DEBUG] Battery: raw={raw}, V_div={v_div:.3f} V, V_bat={v_bat:.2f} V, SOC={soc:.0f}%")
     return soc
 
-# — MOUNT SD & PREP CSV ——————————————————————————————————— #
 print("[DEBUG] Initializing SD card…")
 cs  = Pin(13, Pin.OUT, value=1)
 spi = SoftSPI(baudrate=400_000, polarity=0, phase=0,
@@ -82,7 +75,6 @@ if "log.csv" not in os.listdir("/sd"):
         f.write(",".join(hdr) + "\n")
     print("[DEBUG] Header written")
 
-# — INITIAL STANDBY & START —————————————————————————————————— #
 if reset_cause() == PWRON_RESET:
     print("Waiting for START button…")
     while not btn.value():
@@ -95,12 +87,10 @@ if reset_cause() == PWRON_RESET:
 else:
     print("[DEBUG] Woke from deep-sleep — resuming")
 
-# — MEASURE → SLEEP LOOP ——————————————————————————————————— #
 reading_count = 0
 
 while True:
     reading_count += 1
-    # low-battery check
     soc = read_battery()
     if soc <= LOW_SOC_LIMIT:
         print("[WARN] Low battery → 5 s solid indicator")
@@ -109,13 +99,11 @@ while True:
         led.value(0)
         deepsleep()
 
-    # build time counter
     elapsed = reading_count * LOG_INTERVAL
     hrs = elapsed // 3600
     mins = (elapsed % 3600) // 60
     tc = f"{hrs:03d}h:{mins:02d}m"
 
-    # read each thermistor
     temps = []
     for ch in range(NUM_THERM):
         try:
@@ -125,7 +113,6 @@ while True:
             print(f"[ERROR] read_therm({ch}) failed:", e)
             temps.append("NaN")
 
-    # write to CSV
     row = [tc] + temps + [f"{soc:.0f}"]
     print("[DEBUG] Writing bare info to CSV…")
     try:
@@ -135,7 +122,6 @@ while True:
     except Exception as e:
         print("[ERROR] CSV write failed:", e)
 
-    # blink LED and sleep
     led.value(1)
     utime.sleep_ms(200)
     led.value(0)
