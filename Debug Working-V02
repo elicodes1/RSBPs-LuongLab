@@ -1,3 +1,8 @@
+# This script reads variables at the top and determines both temperature and battery percentage remaining
+# while pinting out information on the deubgging line!
+
+# If you are powering the pico via batteries and using USB you need a diode.
+
 from machine   import Pin, SoftI2C, SoftSPI, ADC, deepsleep, reset_cause, PWRON_RESET
 import sdcard, os, utime, math
 
