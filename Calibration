@@ -1,15 +1,14 @@
 # main_calibration.py
-# MicroPython script for RP2040 Pico to read:
 #   1) Atlas EZO-RTD reference temperature over UART
 #   2) Six NTC thermistors via a 74HC4051 MUX into ADC0 (GP26)
 #
 # It then prints each thermistor’s calculated temperature alongside the
-# EZO reference so you can determine per-channel offsets.
+# EZO is the reference so you can determine per-channel offsets and drop them in the appropriate string.
 
 import machine
 import time
 import math
-import ure  # built-in MicroPython regex module
+import ure  
 
 # ——— CONFIGURATION ———
 
@@ -33,7 +32,10 @@ REF_CHANNEL = 6  # Channel 6 is reserved if you ever log system voltage
 
 # Thermistor setup
 PULLUP_RES   = 10_000   # 10 kΩ pull-up resistor on each channel
-VPULL        = 3.27     # measured Pico 3.3 V rail (adjust if your Pico reads ~3.30 V)
+VPULL        = 3.27     
+
+# measured Pico 3.3 V rail (adjust if your Pico reads ~3.30 V)
+# When using the original unit there is a 3.3v regulator so the variable above is always 3.27 +- 0.01v
 
 # Steinhart–Hart coefficients for a “standard” 10 kΩ NTC (B ≈ 3950).
 Acoef = 1.009249522e-3
@@ -56,7 +58,6 @@ S2 = machine.Pin(S2_PIN, machine.Pin.OUT)
 uart = machine.UART(UART_ID, EZO_BAUDRATE)
 # On UART(0): TX=GP0, RX=GP1
 
-# Flush any pending data
 while uart.any():
     uart.read()
 
