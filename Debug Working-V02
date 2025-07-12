@@ -2,9 +2,9 @@ from machine import Pin, SoftI2C, SoftSPI, ADC, deepsleep, reset_cause, PWRON_RE
 import sdcard, os, utime, math
 
 # — USER CONFIG ————————————————————————————————————— #
-LOG_INTERVAL      = 1200        # seconds between log cycles
-LOW_SOC_LIMIT     = 5           # %SOC below which we abort
-NUM_THERM         = 5           # channels on your HW-178
+LOG_INTERVAL      = 1200        # seconds between log cycles 
+LOW_SOC_LIMIT     = 5           # %SOC below which system shuts down
+NUM_THERM         = 6           # channels on your HW-178
 
 BTN_PIN           = 16          # start button (to 3V3)
 LED_PIN           = 20          # external LED via 330 Ω to GND
