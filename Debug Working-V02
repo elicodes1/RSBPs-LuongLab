@@ -12,7 +12,7 @@ BAT_ADC_CH        = 1           # GP27 / A1
 
 # Thermistor (Steinhart–Hart) constants
 a_A, b_B, c_C     = 1.009249522e-3, 2.378405444e-4, 2.019202697e-7
-OFFSETS           = { 0:-7.412, 1:-7.603, 2:-7.521, 3:-7.782, 4:-7.700 }
+OFFSETS           = { 0:-7.42, 1:-7.6, 2:-7.5, 3:-7.78, 4:-7.7, 5:-7.6 }
 PULLUP_RES        = 10_000
 VPULL             = 3.30        # pull-up voltage for thermistor divider
 
