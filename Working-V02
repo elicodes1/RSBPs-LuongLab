@@ -1,24 +1,33 @@
-from machine   import Pin, SoftI2C, SoftSPI, ADC, deepsleep, reset_cause, PWRON_RESET
+from machine import Pin, SoftI2C, SoftSPI, ADC, deepsleep, reset_cause, PWRON_RESET
 import sdcard, os, utime, math
 
-LOG_INTERVAL   = 1200        # seconds between log cycles
-LOW_SOC_LIMIT  = 5           # %SOC below which we abort
-NUM_THERM      = 5           # channels on your HW-178
+# — USER CONFIG ————————————————————————————————————— #
+LOG_INTERVAL      = 1200        # seconds between log cycles 
+LOW_SOC_LIMIT     = 5           # %SOC below which system shuts down
+NUM_THERM         = 6           # channels on your HW-178
 
-BTN_PIN        = 16          # start button (to 3V3)
-LED_PIN        = 20          # external LED via 330 Ω to GND
-BAT_ADC_CH     = 1           # GP27 / A1
+BTN_PIN           = 16          # start button (to 3V3)
+LED_PIN           = 20          # external LED via 330 Ω to GND
+BAT_ADC_CH        = 1           # GP27 / A1
 
-OFFSETS = {0:-7.412,1:-7.603,2:-7.521,3:-7.782,4:-7.700}
-a_A, b_B, c_C = 1.009249522e-3, 2.378405444e-4, 2.019202697e-7
-PULLUP_RES     = 10_000
-VPULL          = 3.30        # pull-up voltage for thermistor divider
+# Thermistor (Steinhart–Hart) constants
+a_A, b_B, c_C     = 1.009249522e-3, 2.378405444e-4, 2.019202697e-7
+OFFSETS           = { 0:-7.42, 1:-7.6, 2:-7.5, 3:-7.78, 4:-7.7, 5:-7.6 }
+PULLUP_RES        = 10_000
+VPULL             = 3.30        # pull-up voltage for thermistor divider
 
-BAT_R1, BAT_R2 = 10_000, 10_000
+# Battery divider: two 10 kΩ → V_div = ½·V_bat
+BAT_R1, BAT_R2   = 10_000, 10_000
 
+# RTC DS3231 on GP14/15
 RTC_SCL, RTC_SDA = 14, 15
-DS3231_ADDR     = 0x68
+DS3231_ADDR      = 0x68
 
+# SD paths
+LOG_PATH         = "/sd/log.csv"
+EPOCH_PATH       = "/sd/start_epoch.txt"
+
+# — SETUP PINS ————————————————————————————————————— #
 btn   = Pin(BTN_PIN, Pin.IN,  Pin.PULL_DOWN)
 led   = Pin(LED_PIN, Pin.OUT, value=0)
 
@@ -27,103 +36,110 @@ adc0  = ADC(0)
 adc_b = ADC(BAT_ADC_CH)
 S0,S1,S2 = [Pin(p,Pin.OUT) for p in (2,3,4)]
 
-def bcd2dec(b): return (b>>4)*10 + (b&0x0F)
+# — HELPERS ————————————————————————————————————————— #
+def bcd2dec(b):
+    return (b >> 4)*10 + (b & 0x0F)
+
+def get_rtc_tuple():
+    # returns a tuple suitable for utime.mktime: (yr,mo,day,hr,mn,sec,0,0)
+    d = i2c.readfrom_mem(DS3231_ADDR, 0x00, 7)
+    sec, mn, hr = (bcd2dec(d[i]) for i in (0,1,2))
+    day, mo      = bcd2dec(d[4]), bcd2dec(d[5])
+    yr           = bcd2dec(d[6]) + 2000
+    return (yr, mo, day, hr, mn, sec, 0, 0)
 
 def select_mux(ch):
-    S0.value(ch&1); S1.value((ch>>1)&1); S2.value((ch>>2)&1)
-    print(f"  [DEBUG] MUX select channel {ch}")
+    S0.value(ch & 1)
+    S1.value((ch >> 1) & 1)
+    S2.value((ch >> 2) & 1)
 
 def read_therm(ch):
-    select_mux(ch); utime.sleep_ms(80)
-    _ = adc0.read_u16(); utime.sleep_ms(20)
+    select_mux(ch)
+    utime.sleep_ms(100)                   # give the mux time to settle
+    _ = adc0.read_u16()                   # dummy read
     raw = adc0.read_u16()
-    v   = raw*(VPULL/65535)
-    Rth = (v/(VPULL-v))*PULLUP_RES
+    v   = raw * (VPULL / 65535)
+    Rth = (v / (VPULL - v)) * PULLUP_RES
     lnR = math.log(Rth)
-    Tk  = 1.0/(a_A + b_B*lnR + c_C*(lnR**3))
+    Tk  = 1.0 / (a_A + b_B*lnR + c_C*(lnR**3))
     Tc  = Tk - 273.15 + OFFSETS[ch]
-    print(f"  [DEBUG] ch{ch}: raw={raw}, V={v:.3f} V, R={Rth:.1f} Ω, T={Tc:.2f} °C")
     return Tc
 
 def read_battery():
-    _ = adc_b.read_u16(); utime.sleep_ms(10)
+    _ = adc_b.read_u16()
+    utime.sleep_ms(10)
     raw   = adc_b.read_u16()
-    v_div = raw*(VPULL/65535)
-    v_bat = v_div*((BAT_R1+BAT_R2)/BAT_R2)
-    soc   = min(max((v_bat-3.0)/(4.2-3.0)*100,0),100)
-    print(f"  [DEBUG] Battery: raw={raw}, V_div={v_div:.3f} V, V_bat={v_bat:.2f} V, SOC={soc:.0f}%")
+    v_div = raw * (VPULL / 65535)
+    v_bat = v_div * ((BAT_R1 + BAT_R2) / BAT_R2)
+    soc   = min(max((v_bat - 3.0) / (4.2 - 3.0) * 100, 0), 100)
     return soc
 
-print("[DEBUG] Initializing SD card…")
+# — MOUNT SD & PREP CSV ——————————————————————————————————— #
 cs  = Pin(13, Pin.OUT, value=1)
 spi = SoftSPI(baudrate=400_000, polarity=0, phase=0,
               sck=Pin(12), mosi=Pin(11), miso=Pin(10))
-try:
-    sd = sdcard.SDCard(spi, cs)
-    os.mount(sd, "/sd")
-    print("[DEBUG] SD mounted OK")
-except Exception as e:
-    print("[ERROR] SD init/mount failed:", e)
+sd  = sdcard.SDCard(spi, cs)
+os.mount(sd, "/sd")
 
-LOG = "/sd/log.csv"
+# create slim header if needed
 if "log.csv" not in os.listdir("/sd"):
-    print("[DEBUG] Creating new log.csv header")
-    hdr = ["time_counter"] + \
-          [f"ch{ch}_C" for ch in range(NUM_THERM)] + \
-          ["bat_%"]
-    with open(LOG, "w") as f:
+    hdr = ["timestamp"] + [f"ch{ch}_C" for ch in range(NUM_THERM)]
+    with open(LOG_PATH, "w") as f:
         f.write(",".join(hdr) + "\n")
-    print("[DEBUG] Header written")
 
+# — INITIAL STANDBY, BASELINE EPOCH & START ——————————————————————————— #
 if reset_cause() == PWRON_RESET:
     print("Waiting for START button…")
     while not btn.value():
         utime.sleep_ms(50)
-    print("[DEBUG] START pressed")
+
+    # blink 5× to confirm start
     for _ in range(5):
         led.toggle()
         utime.sleep(0.5)
     led.value(0)
+
+    # record baseline RTC epoch for elapsed-time calc
+    base = utime.mktime(get_rtc_tuple())
+    with open(EPOCH_PATH, "w") as f:
+        f.write(str(base))
+
 else:
     print("[DEBUG] Woke from deep-sleep — resuming")
 
-reading_count = 0
-
+# — MEASURE → SLEEP LOOP ——————————————————————————————————— #
 while True:
-    reading_count += 1
+    # battery check & low-power abort
     soc = read_battery()
     if soc <= LOW_SOC_LIMIT:
-        print("[WARN] Low battery → 5 s solid indicator")
         led.value(1)
         utime.sleep(5)
         led.value(0)
         deepsleep()
 
-    elapsed = reading_count * LOG_INTERVAL
-    hrs = elapsed // 3600
-    mins = (elapsed % 3600) // 60
-    tc = f"{hrs:03d}h:{mins:02d}m"
+    # compute elapsed time since start
+    with open(EPOCH_PATH) as f:
+        base = int(f.read())
+    now  = utime.mktime(get_rtc_tuple())
+    delta = now - base
+    hrs    = delta // 3600
+    mins   = (delta % 3600) // 60
+    ts     = f"{hrs:03d}h:{mins:02d}m"
 
-    temps = []
+    # read all thermistors → build row of °C only
+    row = [ts]
     for ch in range(NUM_THERM):
-        try:
-            Tc = read_therm(ch)
-            temps.append(f"{Tc:.2f}")
-        except Exception as e:
-            print(f"[ERROR] read_therm({ch}) failed:", e)
-            temps.append("NaN")
+        Tc = read_therm(ch)
+        row.append(f"{Tc:.2f}")
 
-    row = [tc] + temps + [f"{soc:.0f}"]
-    print("[DEBUG] Writing bare info to CSV…")
-    try:
-        with open(LOG, "a") as f:
-            f.write(",".join(row) + "\n")
-        print("[DEBUG] CSV write OK")
-    except Exception as e:
-        print("[ERROR] CSV write failed:", e)
+    # append to CSV
+    with open(LOG_PATH, "a") as f:
+        f.write(",".join(row) + "\n")
 
+    # blink to show activity
     led.value(1)
     utime.sleep_ms(200)
     led.value(0)
-    print(f"[DEBUG] Sleeping for {LOG_INTERVAL}s")
+
+    # deep-sleep until next cycle
     deepsleep(LOG_INTERVAL * 1000)
