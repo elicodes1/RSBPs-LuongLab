@@ -41,28 +41,31 @@ def bcd2dec(b):
     return (b >> 4)*10 + (b & 0x0F)
 
 def get_rtc_tuple():
-    # returns a tuple suitable for utime.mktime: (yr,mo,day,hr,mn,sec,0,0)
     d = i2c.readfrom_mem(DS3231_ADDR, 0x00, 7)
     sec, mn, hr = (bcd2dec(d[i]) for i in (0,1,2))
     day, mo      = bcd2dec(d[4]), bcd2dec(d[5])
     yr           = bcd2dec(d[6]) + 2000
+    ts_str = f"RTC: {yr:04d}-{mo:02d}-{day:02d} {hr:02d}:{mn:02d}:{sec:02d}"
+    print("[DEBUG]", ts_str)
     return (yr, mo, day, hr, mn, sec, 0, 0)
 
 def select_mux(ch):
     S0.value(ch & 1)
     S1.value((ch >> 1) & 1)
     S2.value((ch >> 2) & 1)
+    print(f"[DEBUG] MUX -> channel {ch}")
 
 def read_therm(ch):
     select_mux(ch)
-    utime.sleep_ms(100)                   # give the mux time to settle
-    _ = adc0.read_u16()                   # dummy read
+    utime.sleep_ms(100)                   # allow mux to settle
+    _ = adc0.read_u16()                   # dummy
     raw = adc0.read_u16()
     v   = raw * (VPULL / 65535)
     Rth = (v / (VPULL - v)) * PULLUP_RES
     lnR = math.log(Rth)
     Tk  = 1.0 / (a_A + b_B*lnR + c_C*(lnR**3))
     Tc  = Tk - 273.15 + OFFSETS[ch]
+    print(f"[DEBUG] ch{ch}: raw={raw}, V={v:.3f}V, Rth={Rth:.1f}Ω, T={Tc:.2f}°C")
     return Tc
 
 def read_battery():
@@ -72,6 +75,7 @@ def read_battery():
     v_div = raw * (VPULL / 65535)
     v_bat = v_div * ((BAT_R1 + BAT_R2) / BAT_R2)
     soc   = min(max((v_bat - 3.0) / (4.2 - 3.0) * 100, 0), 100)
+    print(f"[DEBUG] Battery: raw={raw}, V_div={v_div:.3f}V, V_bat={v_bat:.2f}V, SOC={soc:.0f}%")
     return soc
 
 # — MOUNT SD & PREP CSV ——————————————————————————————————— #
@@ -81,7 +85,6 @@ spi = SoftSPI(baudrate=400_000, polarity=0, phase=0,
 sd  = sdcard.SDCard(spi, cs)
 os.mount(sd, "/sd")
 
-# create slim header if needed
 if "log.csv" not in os.listdir("/sd"):
     hdr = ["timestamp"] + [f"ch{ch}_C" for ch in range(NUM_THERM)]
     with open(LOG_PATH, "w") as f:
@@ -93,31 +96,27 @@ if reset_cause() == PWRON_RESET:
     while not btn.value():
         utime.sleep_ms(50)
 
-    # blink 5× to confirm start
     for _ in range(5):
         led.toggle()
         utime.sleep(0.5)
     led.value(0)
 
-    # record baseline RTC epoch for elapsed-time calc
     base = utime.mktime(get_rtc_tuple())
     with open(EPOCH_PATH, "w") as f:
         f.write(str(base))
-
 else:
     print("[DEBUG] Woke from deep-sleep — resuming")
 
 # — MEASURE → SLEEP LOOP ——————————————————————————————————— #
 while True:
-    # battery check & low-power abort
     soc = read_battery()
     if soc <= LOW_SOC_LIMIT:
+        print("[WARN] Low SOC → shutdown")
         led.value(1)
         utime.sleep(5)
         led.value(0)
         deepsleep()
 
-    # compute elapsed time since start
     with open(EPOCH_PATH) as f:
         base = int(f.read())
     now  = utime.mktime(get_rtc_tuple())
@@ -125,21 +124,20 @@ while True:
     hrs    = delta // 3600
     mins   = (delta % 3600) // 60
     ts     = f"{hrs:03d}h:{mins:02d}m"
+    print(f"[DEBUG] Elapsed timestamp: {ts}")
 
-    # read all thermistors → build row of °C only
     row = [ts]
     for ch in range(NUM_THERM):
         Tc = read_therm(ch)
         row.append(f"{Tc:.2f}")
 
-    # append to CSV
+    print(f"[DEBUG] Writing row: {row}")
     with open(LOG_PATH, "a") as f:
         f.write(",".join(row) + "\n")
 
-    # blink to show activity
     led.value(1)
     utime.sleep_ms(200)
     led.value(0)
 
-    # deep-sleep until next cycle
+    print(f"[DEBUG] Sleeping for {LOG_INTERVAL}s...")
     deepsleep(LOG_INTERVAL * 1000)
